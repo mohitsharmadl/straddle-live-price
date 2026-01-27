@@ -1,122 +1,82 @@
-# Getting Started - Straddle Live Price Tracker
+# Straddle Live Price Tracker
 
-## Prerequisites
+## Daily Usage (Start Here!)
 
+Run these commands every morning to start tracking:
+
+```bash
+cd /Users/mohitsharma/straddle-live-price
+source venv/bin/activate
+python main.py
+```
+
+**That's it!** The app will:
+1. Open browser for Zerodha login (first time each day)
+2. Let you select NIFTY or SENSEX
+3. Let you pick expiry date
+4. Start tracking straddle prices every second
+5. Save charts to `charts/` folder every 30 seconds
+6. Press `Ctrl+C` to stop
+
+---
+
+## One-Liner (Copy-Paste Daily)
+
+```bash
+cd /Users/mohitsharma/straddle-live-price && source venv/bin/activate && python main.py
+```
+
+---
+
+## First-Time Setup (Already Done ✅)
+
+<details>
+<summary>Click to expand if you need to set up on a new machine</summary>
+
+### Prerequisites
 - Python 3.11+
 - PostgreSQL installed and running
-- Zerodha Kite API credentials (get from [Kite Connect](https://developers.kite.trade/))
+- Zerodha Kite API credentials
 
----
-
-## Setup Commands
-
-### 1. Navigate to project
+### Setup Commands
 
 ```bash
+# Navigate to project
 cd /Users/mohitsharma/straddle-live-price
-```
 
-### 2. Create virtual environment
-
-```bash
-python -m venv venv
-```
-
-### 3. Activate virtual environment
-
-```bash
-source venv/bin/activate
-```
-
-### 4. Install dependencies
-
-```bash
-pip install -r requirements.txt
-```
-
-### 5. Configure environment
-
-```bash
-cp .env.example .env
-```
-
-Then edit `.env` with your credentials:
-```
-KITE_API_KEY=your_api_key_here
-KITE_API_SECRET=your_api_secret_here
-DATABASE_URL=postgresql://username:password@localhost:5432/straddle_db
-```
-
-### 6. Create PostgreSQL database
-
-```bash
-createdb straddle_db
-```
-
-### 7. Create database tables
-
-```bash
-psql -d straddle_db -f setup_db.sql
-```
-
-### 8. Run the application
-
-```bash
-python main.py
-```
-
----
-
-## Quick Start (Copy-Paste)
-
-```bash
-cd /Users/mohitsharma/straddle-live-price
+# Create and activate virtual environment
 python -m venv venv
 source venv/bin/activate
+
+# Install dependencies
 pip install -r requirements.txt
+
+# Configure environment (copy and edit with your credentials)
 cp .env.example .env
-# Edit .env with your credentials
+
+# Create database
 createdb straddle_db
 psql -d straddle_db -f setup_db.sql
+
+# Run
 python main.py
 ```
 
----
-
-## Daily Usage
-
-```bash
-cd /Users/mohitsharma/straddle-live-price
-source venv/bin/activate
-python main.py
-```
-
----
-
-## What Happens When You Run
-
-1. App authenticates with Zerodha (opens browser first time each day)
-2. Select index: NIFTY or SENSEX
-3. Select expiry date
-4. Press Enter to start tracking
-5. Watch live straddle prices every second
-6. Charts auto-generated every 30 seconds in `charts/` folder
-7. Press `Ctrl+C` to stop
+</details>
 
 ---
 
 ## Troubleshooting
 
 ### Database connection error
-Make sure PostgreSQL is running:
 ```bash
 brew services start postgresql
 ```
 
 ### Kite authentication fails
-- Check your API key/secret in `.env`
-- Ensure your Kite subscription is active
+- Check API key/secret in `.env`
+- Ensure Kite subscription is active
 
 ### No instruments found
-- Market might be closed
-- Check if the selected index has active expiries
+- Market might be closed (9:15 AM - 3:30 PM IST only)
+- Check if selected index has active expiries
