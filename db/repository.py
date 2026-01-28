@@ -42,6 +42,14 @@ class StraddleRepository:
             self.session.commit()
         return straddle_session
 
+    def update_session_strike(self, session_id: int, new_strike: Decimal) -> Optional[StraddleSession]:
+        """Update the ATM strike for a session (when spot moves)."""
+        straddle_session = self.session.query(StraddleSession).get(session_id)
+        if straddle_session:
+            straddle_session.atm_strike = new_strike
+            self.session.commit()
+        return straddle_session
+
     def get_session(self, session_id: int) -> Optional[StraddleSession]:
         """Get a session by ID."""
         return self.session.query(StraddleSession).get(session_id)

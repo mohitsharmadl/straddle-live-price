@@ -5,3 +5,5 @@ matplotlib>=3.8.0
 python-dotenv>=1.0.0
 rich>=13.7.0
 asyncio>=3.4.3
+playwright>=1.40.0
+pyotp>=2.9.0

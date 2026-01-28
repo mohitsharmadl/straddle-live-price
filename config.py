@@ -16,6 +16,16 @@ class Config:
     KITE_API_KEY: str = os.getenv('KITE_API_KEY', '')
     KITE_API_SECRET: str = os.getenv('KITE_API_SECRET', '')
 
+    # Kite login credentials (for headless auto-login)
+    KITE_USER_ID: str = os.getenv('KITE_USER_ID', '')
+    KITE_PASSWORD: str = os.getenv('KITE_PASSWORD', '')
+    KITE_TOTP_SECRET: str = os.getenv('KITE_TOTP_SECRET', '')
+
+    # Headless mode settings
+    HEADLESS_MODE: bool = os.getenv('HEADLESS_MODE', 'true').lower() == 'true'
+    DEFAULT_INDEX: str = os.getenv('DEFAULT_INDEX', 'NIFTY')
+    DEFAULT_EXPIRY_OFFSET: int = int(os.getenv('DEFAULT_EXPIRY_OFFSET', '0'))
+
     # Database
     DATABASE_URL: str = os.getenv('DATABASE_URL', 'postgresql://localhost:5432/straddle_db')
 
@@ -46,6 +56,12 @@ class Config:
             missing.append('KITE_API_SECRET')
         if not cls.DATABASE_URL:
             missing.append('DATABASE_URL')
+        # Validate headless login credentials
+        if cls.HEADLESS_MODE:
+            if not cls.KITE_USER_ID:
+                missing.append('KITE_USER_ID')
+            if not cls.KITE_PASSWORD:
+                missing.append('KITE_PASSWORD')
         return missing
 
 

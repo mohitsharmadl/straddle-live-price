@@ -165,7 +165,8 @@ class StraddleCalculator:
 
         Used before WebSocket streaming starts.
         """
-        prices = self.kite.get_ltp([call_token, put_token])
+        exchange = self.kite.get_exchange_for_index(index_name)
+        prices = self.kite.get_ltp([call_token, put_token], exchange=exchange)
         spot_price = self.kite.get_index_ltp(index_name)
 
         call_price = prices.get(call_token, 0)

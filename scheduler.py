@@ -3,12 +3,15 @@ Scheduler for 1-second price tracking during market hours.
 """
 import asyncio
 import signal
-from datetime import datetime, time
+from datetime import datetime, time, timezone, timedelta
 from decimal import Decimal
 from typing import Callable, Optional
 import threading
 
 from config import config
+
+# IST timezone (UTC+5:30)
+IST = timezone(timedelta(hours=5, minutes=30))
 from kite_client import KiteClient
 from straddle_calculator import StraddleCalculator, StraddleInfo, StraddlePrice
 from db import get_session, StraddleRepository
@@ -20,7 +23,8 @@ class StraddleTracker:
     Real-time straddle price tracker.
 
     Fetches prices every second via WebSocket, stores in database,
-    and generates periodic charts.
+    and generates periodic charts. Dynamically adjusts ATM strike
+    when spot price moves.
     """
 
     def __init__(
@@ -48,6 +52,8 @@ class StraddleTracker:
         self._session_id: Optional[int] = None
         self._last_chart_time: Optional[datetime] = None
         self._tick_count = 0
+        self._last_spot_check: Optional[datetime] = None
+        self._strike_switch_cooldown: Optional[datetime] = None
 
         # Price caches (updated by WebSocket)
         self._call_price: Optional[float] = None
@@ -59,8 +65,9 @@ class StraddleTracker:
         self._straddle_prices: list[float] = []
 
     def _is_market_open(self) -> bool:
-        """Check if we're within market hours."""
-        now = datetime.now().time()
+        """Check if we're within market hours (IST)."""
+        # Get current time in IST
+        now_ist = datetime.now(IST).time()
         market_open = time(
             config.MARKET_OPEN_HOUR,
             config.MARKET_OPEN_MINUTE
@@ -69,7 +76,7 @@ class StraddleTracker:
             config.MARKET_CLOSE_HOUR,
             config.MARKET_CLOSE_MINUTE
         )
-        return market_open <= now <= market_close
+        return market_open <= now_ist <= market_close
 
     def _on_price_update(self, tick: dict):
         """Handle WebSocket price update."""
@@ -90,6 +97,71 @@ class StraddleTracker:
             self.straddle.put_token
         ]
         self.kite.start_ticker(tokens, self._on_price_update)
+
+    def _check_and_switch_strike(self, repo: StraddleRepository) -> bool:
+        """
+        Check if spot has moved enough to warrant a strike change.
+        Returns True if strike was switched.
+        """
+        now = datetime.now()
+
+        # Only check every 5 seconds to avoid excessive API calls
+        if self._last_spot_check and (now - self._last_spot_check).total_seconds() < 5:
+            return False
+
+        self._last_spot_check = now
+
+        try:
+            # Get current spot price
+            current_spot = self.kite.get_index_ltp(self.straddle.index_name)
+
+            # Calculate what ATM strike should be now
+            new_atm = self.calculator.find_atm_strike(current_spot, self.straddle.index_name)
+
+            # If strike hasn't changed, nothing to do
+            if new_atm == self.straddle.atm_strike:
+                return False
+
+            print(f"\n[Strike change detected: {self.straddle.atm_strike} -> {new_atm} (spot: {current_spot:.2f})]")
+
+            # Stop current ticker
+            self.kite.stop_ticker()
+
+            # Get new straddle info with the new ATM strike
+            new_straddle = self.calculator.get_straddle_info(
+                index_name=self.straddle.index_name,
+                expiry=self.straddle.expiry,
+                strike_override=new_atm
+            )
+
+            # Update straddle
+            self.straddle = new_straddle
+
+            # Update session in DB with new strike
+            repo.update_session_strike(self._session_id, Decimal(str(new_atm)))
+
+            # Get initial prices for new options
+            initial_price = self.calculator.get_initial_prices(
+                self.straddle.call_token,
+                self.straddle.put_token,
+                self.straddle.index_name
+            )
+            self._call_price = initial_price.call_price
+            self._put_price = initial_price.put_price
+
+            # Restart WebSocket with new tokens
+            self._start_websocket()
+
+            # Set cooldown to skip saving for 2 seconds while prices stabilize
+            self._strike_switch_cooldown = datetime.now()
+
+            print(f"[Now tracking: {self.straddle.call_symbol} + {self.straddle.put_symbol}]")
+
+            return True
+
+        except Exception as e:
+            print(f"Error checking/switching strike: {e}")
+            return False
 
     def _save_tick(self, repo: StraddleRepository, straddle_price: StraddlePrice):
         """Save tick to database."""
@@ -178,8 +250,9 @@ class StraddleTracker:
                     print("\nMarket closed. Stopping tracker...")
                     break
 
-                # Get current prices
-                if self._call_price is not None and self._put_price is not None:
+                # Get current prices - only save if prices are valid (> 0)
+                if (self._call_price is not None and self._put_price is not None
+                    and self._call_price > 0 and self._put_price > 0):
                     now = datetime.now()
 
                     # Calculate straddle price

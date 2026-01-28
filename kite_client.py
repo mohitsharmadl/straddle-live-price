@@ -1,6 +1,7 @@
 """
 Zerodha Kite API client wrapper.
 Handles authentication, instrument fetching, and real-time price streaming.
+Supports headless auto-login with Playwright.
 """
 import json
 import webbrowser
@@ -9,10 +10,19 @@ from http.server import HTTPServer, BaseHTTPRequestHandler
 from urllib.parse import urlparse, parse_qs
 from typing import Optional, Callable
 import threading
+import time
 
 from kiteconnect import KiteConnect, KiteTicker
 
 from config import config
+
+# Optional imports for headless login
+try:
+    from playwright.sync_api import sync_playwright
+    import pyotp
+    HEADLESS_AVAILABLE = True
+except ImportError:
+    HEADLESS_AVAILABLE = False
 
 
 class TokenCaptureHandler(BaseHTTPRequestHandler):
@@ -101,6 +111,15 @@ class KiteClient:
                 except Exception:
                     pass  # Token invalid, proceed with login
 
+        # Use headless login if configured and available
+        if config.HEADLESS_MODE and HEADLESS_AVAILABLE:
+            return self._headless_login()
+
+        # Fall back to browser-based login
+        return self._browser_login()
+
+    def _browser_login(self) -> bool:
+        """Traditional browser-based OAuth login."""
         # Start local server to capture redirect
         server = HTTPServer(('127.0.0.1', 8000), TokenCaptureHandler)
         server.timeout = 120  # 2 minute timeout
@@ -133,6 +152,220 @@ class KiteClient:
             print(f"Authentication failed: {e}")
             return False
 
+    def _headless_login(self) -> bool:
+        """
+        Headless browser login using Playwright.
+        Automatically fills credentials and handles TOTP.
+        """
+        print("Starting headless auto-login...")
+
+        login_url = self.kite.login_url()
+
+        with sync_playwright() as p:
+            browser = p.chromium.launch(headless=True)
+            context = browser.new_context(
+                user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+            )
+            page = context.new_page()
+
+            # Set up early request monitoring to capture redirect URL
+            captured_token = {'value': None}
+
+            def capture_redirect(request):
+                url = request.url
+                if 'request_token=' in url and not captured_token['value']:
+                    import re
+                    match = re.search(r'request_token=([^&]+)', url)
+                    if match:
+                        captured_token['value'] = match.group(1)
+                        print(f"Captured request token from redirect!")
+
+            page.on('request', capture_redirect)
+
+            try:
+                # Navigate to login page
+                print("Navigating to Kite login...")
+                page.goto(login_url, wait_until='networkidle', timeout=30000)
+                time.sleep(2)
+
+                # Fill user ID - try multiple selectors
+                print(f"Entering User ID: {config.KITE_USER_ID}")
+                userid_selectors = [
+                    'input#userid',
+                    'input[type="text"]',
+                    'input[placeholder*="User"]',
+                    'input[name="user_id"]',
+                ]
+                for selector in userid_selectors:
+                    try:
+                        if page.locator(selector).first.is_visible(timeout=2000):
+                            page.fill(selector, config.KITE_USER_ID)
+                            break
+                    except:
+                        continue
+
+                # Fill password - try multiple selectors
+                print("Entering password...")
+                password_selectors = [
+                    'input#password',
+                    'input[type="password"]',
+                    'input[placeholder*="Password"]',
+                    'input[name="password"]',
+                ]
+                for selector in password_selectors:
+                    try:
+                        if page.locator(selector).first.is_visible(timeout=2000):
+                            page.fill(selector, config.KITE_PASSWORD)
+                            break
+                    except:
+                        continue
+
+                # Click login button
+                print("Clicking login button...")
+                submit_selectors = [
+                    'button[type="submit"]',
+                    'button.button-orange',
+                    'button:has-text("Login")',
+                    'input[type="submit"]',
+                ]
+                for selector in submit_selectors:
+                    try:
+                        if page.locator(selector).first.is_visible(timeout=2000):
+                            page.click(selector)
+                            break
+                    except:
+                        continue
+
+                time.sleep(3)
+
+                # Handle TOTP if configured
+                if config.KITE_TOTP_SECRET:
+                    totp = pyotp.TOTP(config.KITE_TOTP_SECRET)
+                    totp_code = totp.now()
+                    print(f"Entering TOTP code...")
+
+                    # Wait for TOTP input field
+                    totp_selectors = [
+                        'input[type="number"]',
+                        'input[type="text"]:visible',
+                        'input#totp',
+                        'input[placeholder*="TOTP"]',
+                        'input[placeholder*="OTP"]',
+                        'input.su-input-group',
+                    ]
+
+                    totp_entered = False
+                    for selector in totp_selectors:
+                        try:
+                            page.wait_for_selector(selector, timeout=5000)
+                            if page.locator(selector).first.is_visible():
+                                page.fill(selector, totp_code)
+                                totp_entered = True
+                                break
+                        except:
+                            continue
+
+                    if not totp_entered:
+                        # Try filling any visible input
+                        page.locator('input:visible').first.fill(totp_code)
+
+                    time.sleep(1)
+
+                    # Click continue/submit for TOTP
+                    for selector in submit_selectors:
+                        try:
+                            if page.locator(selector).first.is_visible(timeout=2000):
+                                page.click(selector)
+                                break
+                        except:
+                            continue
+
+                    time.sleep(3)
+
+                # Handle app authorization screen (secondary password prompt)
+                # This screen appears after TOTP for third-party app authorization
+                try:
+                    # Check if there's another password field (app authorization)
+                    auth_password_field = page.locator('input[type="password"], input[placeholder*="password" i]').first
+                    if auth_password_field.is_visible(timeout=3000):
+                        print("Handling app authorization - entering password again...")
+                        auth_password_field.fill(config.KITE_PASSWORD)
+                        time.sleep(1)
+
+                        # Click authorize/continue button
+                        auth_button_selectors = [
+                            'button[type="submit"]',
+                            'button:has-text("Authorize")',
+                            'button:has-text("Continue")',
+                            'button.button-orange',
+                        ]
+                        for selector in auth_button_selectors:
+                            try:
+                                btn = page.locator(selector).first
+                                if btn.is_visible(timeout=1000):
+                                    btn.click()
+                                    break
+                            except:
+                                continue
+                        time.sleep(3)
+                except:
+                    pass  # No app authorization screen
+
+                # Wait for redirect and capture request_token
+                print("Waiting for redirect with request token...")
+
+                # Wait and poll for request_token (captured by earlier listener)
+                max_attempts = 30
+                for attempt in range(max_attempts):
+                    if captured_token['value']:
+                        break
+                    # Also check current URL
+                    current_url = page.url
+                    if 'request_token=' in current_url:
+                        import re
+                        match = re.search(r'request_token=([^&]+)', current_url)
+                        if match:
+                            captured_token['value'] = match.group(1)
+                            print(f"Got request token from URL!")
+                            break
+                    time.sleep(1)
+
+                request_token = captured_token['value']
+
+                if not request_token:
+                    print(f"Failed to get request_token after {max_attempts}s. Final URL: {page.url}")
+                    page.screenshot(path='/tmp/login_final_state.png')
+                    return False
+
+                print("Exchanging request token for access token...")
+
+            except Exception as e:
+                print(f"Headless login error: {e}")
+                # Take screenshot for debugging
+                try:
+                    page.screenshot(path='/tmp/login_error.png')
+                    print("Screenshot saved to /tmp/login_error.png")
+                except:
+                    pass
+                return False
+            finally:
+                browser.close()
+
+        # Exchange request token for access token
+        try:
+            data = self.kite.generate_session(
+                request_token,
+                api_secret=config.KITE_API_SECRET
+            )
+            self.access_token = data['access_token']
+            self.kite.set_access_token(self.access_token)
+            self._save_token(self.access_token)
+            print("Headless login successful!")
+            return True
+        except Exception as e:
+            print(f"Session generation failed: {e}")
+            return False
+
     def get_profile(self) -> dict:
         """Get user profile information."""
         return self.kite.profile()
@@ -149,15 +382,22 @@ class KiteClient:
     def get_index_instruments(self, index_name: str) -> list[dict]:
         """
         Get all option instruments for an index (NIFTY or SENSEX).
+        NIFTY options are on NFO (NSE), SENSEX options are on BFO (BSE).
         """
-        instruments = self.get_instruments('NFO')
-
-        # Map index names to underlying names in Kite
-        name_map = {
-            'NIFTY': 'NIFTY',
-            'SENSEX': 'SENSEX'
+        # Map index to exchange and underlying name
+        index_config = {
+            'NIFTY': {'exchange': 'NFO', 'name': 'NIFTY'},
+            'SENSEX': {'exchange': 'BFO', 'name': 'SENSEX'}
         }
-        underlying = name_map.get(index_name.upper(), index_name.upper())
+
+        config_entry = index_config.get(index_name.upper())
+        if not config_entry:
+            return []
+
+        exchange = config_entry['exchange']
+        underlying = config_entry['name']
+
+        instruments = self.get_instruments(exchange)
 
         return [
             inst for inst in instruments
@@ -170,18 +410,26 @@ class KiteClient:
         expiries = sorted(set(inst['expiry'] for inst in instruments))
         return expiries
 
-    def get_ltp(self, instrument_tokens: list[int]) -> dict[int, float]:
+    def get_ltp(self, instrument_tokens: list[int], exchange: str = 'NFO') -> dict[int, float]:
         """Get last traded price for instruments."""
         if not instrument_tokens:
             return {}
 
         # Kite API expects exchange:token format for quotes
         # We'll use the ticker for real-time, this is for initial fetch
-        quotes = self.kite.ltp([f"NFO:{token}" for token in instrument_tokens])
+        quotes = self.kite.ltp([f"{exchange}:{token}" for token in instrument_tokens])
         return {
             int(key.split(':')[1]): data['last_price']
             for key, data in quotes.items()
         }
+
+    def get_exchange_for_index(self, index_name: str) -> str:
+        """Get the exchange for an index (NFO for NIFTY, BFO for SENSEX)."""
+        exchange_map = {
+            'NIFTY': 'NFO',
+            'SENSEX': 'BFO'
+        }
+        return exchange_map.get(index_name.upper(), 'NFO')
 
     def get_index_ltp(self, index_name: str) -> float:
         """Get current spot price for an index."""

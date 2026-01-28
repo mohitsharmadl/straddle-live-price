@@ -6,18 +6,20 @@ A CLI application that tracks ATM straddle prices for NIFTY/SENSEX options
 in real-time using Zerodha Kite API.
 
 Usage:
-    python main.py
+    python main.py              # Headless: auto-selects nearest expiry (0/1/2 DTE)
+    python main.py --interactive # Interactive mode with manual selection
 
-The application will:
-1. Authenticate with Zerodha Kite (opens browser for login if needed)
-2. Let you select an index (NIFTY/SENSEX) and expiry date
-3. Calculate the ATM strike and start tracking straddle prices
-4. Store every tick in PostgreSQL
-5. Generate charts at configured intervals
+In headless mode, the app automatically:
+1. Authenticates with Zerodha Kite (auto-login)
+2. Finds the nearest expiry across NIFTY and SENSEX (0 DTE > 1 DTE > 2 DTE)
+3. Tracks the ATM straddle for that expiry
+4. Stores every tick in PostgreSQL
+5. Generates charts at configured intervals
 """
+import argparse
 import asyncio
 import sys
-from datetime import datetime
+from datetime import datetime, date
 
 from rich.console import Console
 from rich.prompt import Prompt, IntPrompt
@@ -34,6 +36,17 @@ from db import init_db
 
 
 console = Console()
+
+
+def parse_args():
+    """Parse command line arguments."""
+    parser = argparse.ArgumentParser(description='Straddle Live Price Tracker')
+    parser.add_argument(
+        '--interactive',
+        action='store_true',
+        help='Force interactive mode (manual index/expiry selection)'
+    )
+    return parser.parse_args()
 
 
 def print_header():
@@ -119,7 +132,8 @@ def create_tick_callback(console: Console):
 async def run_tracker(
     kite_client: KiteClient,
     index_name: str,
-    expiry
+    expiry,
+    headless: bool = False
 ):
     """Run the straddle tracker."""
     calculator = StraddleCalculator(kite_client)
@@ -142,9 +156,10 @@ async def run_tracker(
 
     console.print(table)
 
-    # Confirm start
-    console.print("\n[dim]Press Enter to start tracking (Ctrl+C to stop)[/dim]")
-    input()
+    # Confirm start only in interactive mode
+    if not headless:
+        console.print("\n[dim]Press Enter to start tracking (Ctrl+C to stop)[/dim]")
+        input()
 
     # Create tracker
     tick_callback = create_tick_callback(console)
@@ -171,8 +186,87 @@ async def run_tracker(
     console.print(f"  Session ID: {tracker.session_id}")
 
 
+def get_expiry_headless(kite_client: KiteClient, index_name: str, expiry_offset: int):
+    """Get expiry date by offset (0 = nearest, 1 = second nearest, etc.)."""
+    console.print("[dim]Fetching available expiries...[/dim]")
+    expiries = kite_client.get_expiries(index_name)
+
+    if not expiries:
+        console.print("[red]No expiries found![/red]")
+        return None
+
+    if expiry_offset >= len(expiries):
+        console.print(f"[yellow]Expiry offset {expiry_offset} out of range, using nearest[/yellow]")
+        expiry_offset = 0
+
+    selected_expiry = expiries[expiry_offset]
+    console.print(f"[dim]Selected expiry: {selected_expiry.strftime('%d-%b-%Y')}[/dim]")
+    return selected_expiry
+
+
+def find_nearest_expiry_index(kite_client: KiteClient):
+    """
+    Find the index (NIFTY or SENSEX) with the nearest expiry.
+
+    Priority: 0 DTE > 1 DTE > 2 DTE
+    If both have same DTE, prefer NIFTY.
+
+    Returns: (index_name, expiry_date, dte)
+    """
+    console.print("[dim]Finding nearest expiry across NIFTY and SENSEX...[/dim]")
+
+    today = date.today()
+    results = []
+
+    for index_name in ['NIFTY', 'SENSEX']:
+        try:
+            expiries = kite_client.get_expiries(index_name)
+            if expiries:
+                nearest_expiry = expiries[0]
+                dte = (nearest_expiry - today).days
+                results.append({
+                    'index': index_name,
+                    'expiry': nearest_expiry,
+                    'dte': dte
+                })
+                console.print(f"[dim]  {index_name}: {nearest_expiry.strftime('%d-%b-%Y')} ({dte} DTE)[/dim]")
+        except Exception as e:
+            console.print(f"[yellow]Failed to fetch {index_name} expiries: {e}[/yellow]")
+
+    if not results:
+        console.print("[red]No expiries found for any index![/red]")
+        return None, None, None
+
+    # Sort by DTE (ascending) - nearest expiry first
+    # If same DTE, NIFTY comes first (alphabetically)
+    results.sort(key=lambda x: (x['dte'], x['index']))
+
+    # Find best match based on DTE priority (0 > 1 > 2)
+    best = None
+    for target_dte in [0, 1, 2]:
+        for r in results:
+            if r['dte'] == target_dte:
+                best = r
+                break
+        if best:
+            break
+
+    # If no 0, 1, or 2 DTE found, use the nearest available
+    if not best:
+        best = results[0]
+
+    console.print(f"[green]Selected: {best['index']} with {best['dte']} DTE expiry on {best['expiry'].strftime('%d-%b-%Y')}[/green]")
+
+    return best['index'], best['expiry'], best['dte']
+
+
 def main():
     """Main entry point."""
+    args = parse_args()
+
+    # Determine if running in headless mode
+    headless = config.HEADLESS_MODE and not args.interactive
+
     print_header()
 
     # Validate configuration
@@ -204,17 +298,28 @@ def main():
         console.print(f"[red]Failed to get profile: {e}[/red]")
         sys.exit(1)
 
-    # Select index
-    index_name = select_index()
+    # Select index and expiry
+    if headless:
+        # Auto-select index with nearest expiry (0 DTE > 1 DTE > 2 DTE)
+        console.print("[dim]Headless mode: Auto-selecting nearest expiry...[/dim]")
+        index_name, expiry, dte = find_nearest_expiry_index(kite_client)
 
-    # Select expiry
-    expiry = select_expiry(kite_client, index_name)
+        if not index_name or not expiry:
+            console.print("[red]Failed to find suitable expiry![/red]")
+            sys.exit(1)
+
+        console.print(f"[bold]Auto-selected: {index_name} {dte} DTE ({expiry.strftime('%d-%b-%Y')})[/bold]")
+    else:
+        # Interactive selection
+        index_name = select_index()
+        expiry = select_expiry(kite_client, index_name)
+
     if not expiry:
         sys.exit(1)
 
     # Run tracker
     try:
-        asyncio.run(run_tracker(kite_client, index_name, expiry))
+        asyncio.run(run_tracker(kite_client, index_name, expiry, headless=headless))
     except Exception as e:
         console.print(f"[red]Error: {e}[/red]")
         import traceback
