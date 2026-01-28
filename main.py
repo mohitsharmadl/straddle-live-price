@@ -222,7 +222,13 @@ def find_nearest_expiry_index(kite_client: KiteClient):
         try:
             expiries = kite_client.get_expiries(index_name)
             if expiries:
-                nearest_expiry = expiries[0]
+                # Filter to only future expiries (DTE >= 0)
+                future_expiries = [exp for exp in expiries if exp >= today]
+                if not future_expiries:
+                    console.print(f"[yellow]  {index_name}: No future expiries found[/yellow]")
+                    continue
+
+                nearest_expiry = future_expiries[0]
                 dte = (nearest_expiry - today).days
                 results.append({
                     'index': index_name,

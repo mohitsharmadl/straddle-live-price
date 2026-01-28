@@ -78,14 +78,28 @@ class StraddleTracker:
         self._put_price: Optional[float] = None
         self._last_update: Optional[datetime] = None
 
+        # Spot price cache (refreshed periodically)
+        self._cached_spot_price: Optional[float] = None
+        self._last_spot_refresh: Optional[datetime] = None
+        self._spot_refresh_interval = 5  # Refresh spot every 5 seconds
+
+        # Staleness detection for WebSocket
+        self._staleness_threshold = 30  # Restart ticker if no updates for 30 seconds
+
         # Data for charting
         self._timestamps: list[datetime] = []
         self._straddle_prices: list[float] = []
 
     def _is_market_open(self) -> bool:
-        """Check if we're within market hours (IST)."""
-        # Get current time in IST
-        now_ist = datetime.now(IST).time()
+        """Check if we're within market hours (IST) on a trading day."""
+        now_ist = datetime.now(IST)
+
+        # Check if it's a weekday (Monday=0 to Friday=4)
+        if now_ist.weekday() > 4:  # Saturday=5, Sunday=6
+            return False
+
+        # Check time of day
+        now_time = now_ist.time()
         market_open = time(
             config.MARKET_OPEN_HOUR,
             config.MARKET_OPEN_MINUTE
@@ -94,7 +108,7 @@ class StraddleTracker:
             config.MARKET_CLOSE_HOUR,
             config.MARKET_CLOSE_MINUTE
         )
-        return market_open <= now_ist <= market_close
+        return market_open <= now_time <= market_close
 
     def _on_price_update(self, tick: dict):
         """Handle WebSocket price update."""
@@ -145,6 +159,10 @@ class StraddleTracker:
             # Stop current ticker
             self.kite.stop_ticker()
 
+            # Reset cached prices to avoid mixed-leg ticks
+            self._call_price = None
+            self._put_price = None
+
             # Get new straddle info with the new ATM strike
             new_straddle = self.calculator.get_straddle_info(
                 index_name=self.straddle.index_name,
@@ -167,6 +185,10 @@ class StraddleTracker:
             self._call_price = initial_price.call_price
             self._put_price = initial_price.put_price
 
+            # Update cached spot price
+            self._cached_spot_price = current_spot
+            self._last_spot_refresh = utc_now()
+
             # Restart WebSocket with new tokens
             self._start_websocket()
 
@@ -188,6 +210,47 @@ class StraddleTracker:
             return False
         elapsed = (utc_now() - self._strike_switch_cooldown).total_seconds()
         return elapsed < STRIKE_SWITCH_COOLDOWN_SECONDS
+
+    def _get_spot_price(self) -> Optional[float]:
+        """Get cached spot price, refreshing if needed."""
+        now = utc_now()
+
+        # Refresh if cache is stale or empty
+        if (self._last_spot_refresh is None or
+            (now - self._last_spot_refresh).total_seconds() >= self._spot_refresh_interval):
+            try:
+                self._cached_spot_price = self.kite.get_index_ltp(self.straddle.index_name)
+                self._last_spot_refresh = now
+            except Exception as e:
+                logger.warning(f"Failed to refresh spot price: {e}")
+                # Return cached value if refresh fails
+
+        return self._cached_spot_price
+
+    def _check_ticker_staleness(self) -> bool:
+        """
+        Check if WebSocket ticker is stale (no updates for too long).
+        Returns True if ticker was restarted.
+        """
+        if self._last_update is None:
+            return False
+
+        elapsed = (utc_now() - self._last_update).total_seconds()
+        if elapsed > self._staleness_threshold:
+            logger.warning(f"WebSocket stale ({elapsed:.0f}s since last update), restarting ticker...")
+            print(f"\n[WebSocket stale ({elapsed:.0f}s), restarting...]")
+
+            try:
+                # Stop and restart ticker
+                self.kite.stop_ticker()
+                self._start_websocket()
+                self._last_update = utc_now()  # Reset staleness timer
+                return True
+            except Exception as e:
+                logger.error(f"Failed to restart ticker: {e}")
+                print(f"[Failed to restart ticker: {e}]")
+
+        return False
 
     def _save_tick(self, repo: StraddleRepository, straddle_price: StraddlePrice):
         """Save tick to database."""
@@ -276,6 +339,9 @@ class StraddleTracker:
                     print("\nMarket closed. Stopping tracker...")
                     break
 
+                # Check if WebSocket is stale and restart if needed
+                self._check_ticker_staleness()
+
                 # Check if ATM strike needs to change (every 5 seconds)
                 self._check_and_switch_strike(repo)
 
@@ -289,10 +355,14 @@ class StraddleTracker:
                     and self._call_price > 0 and self._put_price > 0):
                     now = utc_now()
 
-                    # Calculate straddle price
+                    # Get current spot price (cached, refreshed periodically)
+                    current_spot = self._get_spot_price()
+
+                    # Calculate straddle price with spot
                     straddle_price = self.calculator.calculate_straddle_price(
                         call_price=self._call_price,
-                        put_price=self._put_price
+                        put_price=self._put_price,
+                        spot_price=current_spot
                     )
 
                     # Store for charting (using UTC timestamps)

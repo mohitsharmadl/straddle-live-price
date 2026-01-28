@@ -75,6 +75,13 @@ class KiteClient:
         self._price_callbacks: list[Callable] = []
         self._latest_prices: dict[int, dict] = {}
 
+        # WebSocket reconnection state
+        self._ticker_should_run = False
+        self._ticker_tokens: list[int] = []
+        self._ticker_callback: Optional[Callable] = None
+        self._ticker_reconnect_count = 0
+        self._ticker_max_reconnects = 10
+
     def _load_saved_token(self) -> Optional[str]:
         """Load access token from file if valid."""
         if not config.TOKEN_FILE.exists():
@@ -505,27 +512,47 @@ class KiteClient:
         - instrument_token: int
         - last_price: float
         - timestamp: datetime
+
+        Automatically reconnects on disconnect with exponential backoff.
         """
+        self._ticker_tokens = instrument_tokens
+        self._ticker_callback = on_price_update
+        self._ticker_reconnect_count = 0
+        self._ticker_max_reconnects = 10
+        self._ticker_should_run = True
+
+        self._start_ticker_internal()
+
+    def _start_ticker_internal(self):
+        """Internal method to start/restart the ticker."""
         self.ticker = KiteTicker(config.KITE_API_KEY, self.access_token)
 
         def on_ticks(ws, ticks):
+            # Reset reconnect count on successful tick
+            self._ticker_reconnect_count = 0
             for tick in ticks:
                 self._latest_prices[tick['instrument_token']] = tick
-                on_price_update({
+                self._ticker_callback({
                     'instrument_token': tick['instrument_token'],
                     'last_price': tick['last_price'],
                     'timestamp': tick.get('timestamp', datetime.now())
                 })
 
         def on_connect(ws, response):
-            ws.subscribe(instrument_tokens)
-            ws.set_mode(ws.MODE_LTP, instrument_tokens)
+            print(f"[WebSocket connected]")
+            ws.subscribe(self._ticker_tokens)
+            ws.set_mode(ws.MODE_LTP, self._ticker_tokens)
 
         def on_close(ws, code, reason):
-            pass
+            if not self._ticker_should_run:
+                return  # Intentional close, don't reconnect
+
+            print(f"[WebSocket closed: {code} - {reason}]")
+            self._attempt_reconnect()
 
         def on_error(ws, code, reason):
-            print(f"Ticker error: {code} - {reason}")
+            print(f"[WebSocket error: {code} - {reason}]")
+            # Error will trigger on_close, which handles reconnection
 
         self.ticker.on_ticks = on_ticks
         self.ticker.on_connect = on_connect
@@ -536,8 +563,32 @@ class KiteClient:
         ticker_thread = threading.Thread(target=self.ticker.connect, daemon=True)
         ticker_thread.start()
 
+    def _attempt_reconnect(self):
+        """Attempt to reconnect the WebSocket with exponential backoff."""
+        if not self._ticker_should_run:
+            return
+
+        if self._ticker_reconnect_count >= self._ticker_max_reconnects:
+            print(f"[WebSocket max reconnects ({self._ticker_max_reconnects}) reached, giving up]")
+            return
+
+        self._ticker_reconnect_count += 1
+        # Exponential backoff: 1s, 2s, 4s, 8s, ... capped at 30s
+        delay = min(2 ** (self._ticker_reconnect_count - 1), 30)
+        print(f"[WebSocket reconnecting in {delay}s (attempt {self._ticker_reconnect_count}/{self._ticker_max_reconnects})]")
+
+        def reconnect():
+            import time
+            time.sleep(delay)
+            if self._ticker_should_run:
+                self._start_ticker_internal()
+
+        reconnect_thread = threading.Thread(target=reconnect, daemon=True)
+        reconnect_thread.start()
+
     def stop_ticker(self):
         """Stop the WebSocket ticker."""
+        self._ticker_should_run = False  # Prevent reconnection attempts
         if self.ticker:
             self.ticker.close()
             self.ticker = None
