@@ -11,15 +11,15 @@ CREATE TABLE IF NOT EXISTS straddle_sessions (
     index_name VARCHAR(20) NOT NULL,  -- 'NIFTY' or 'SENSEX'
     expiry_date DATE NOT NULL,
     atm_strike DECIMAL(10,2) NOT NULL,
-    started_at TIMESTAMP DEFAULT NOW(),
-    ended_at TIMESTAMP
+    started_at TIMESTAMPTZ DEFAULT NOW(),  -- Use timezone-aware timestamps (UTC)
+    ended_at TIMESTAMPTZ
 );
 
 -- Price ticks (one per second)
 CREATE TABLE IF NOT EXISTS straddle_ticks (
     id SERIAL PRIMARY KEY,
     session_id INTEGER REFERENCES straddle_sessions(id) ON DELETE CASCADE,
-    timestamp TIMESTAMP NOT NULL,
+    timestamp TIMESTAMPTZ NOT NULL,  -- Use timezone-aware timestamps (UTC)
     call_price DECIMAL(10,2) NOT NULL,
     put_price DECIMAL(10,2) NOT NULL,
     straddle_price DECIMAL(10,2) NOT NULL,
@@ -31,7 +31,7 @@ CREATE TABLE IF NOT EXISTS straddle_charts (
     id SERIAL PRIMARY KEY,
     session_id INTEGER REFERENCES straddle_sessions(id) ON DELETE CASCADE,
     chart_path VARCHAR(500),
-    generated_at TIMESTAMP DEFAULT NOW()
+    generated_at TIMESTAMPTZ DEFAULT NOW()  -- Use timezone-aware timestamps (UTC)
 );
 
 -- Indexes for better query performance
@@ -44,5 +44,5 @@ CREATE INDEX IF NOT EXISTS idx_charts_session_id ON straddle_charts(session_id);
 -- GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO your_user;
 
 COMMENT ON TABLE straddle_sessions IS 'Tracks individual tracking sessions (one per morning run)';
-COMMENT ON TABLE straddle_ticks IS 'Stores price data every second during a session';
+COMMENT ON TABLE straddle_ticks IS 'Stores price data every second during a session (timestamps in UTC)';
 COMMENT ON TABLE straddle_charts IS 'Stores paths to generated chart images';

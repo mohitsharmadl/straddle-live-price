@@ -156,21 +156,33 @@ class StraddleCalculator:
 
     def get_initial_prices(
         self,
-        call_token: int,
-        put_token: int,
+        call_symbol: str,
+        put_symbol: str,
         index_name: str
     ) -> StraddlePrice:
         """
         Fetch initial prices for straddle components.
 
         Used before WebSocket streaming starts.
+
+        Args:
+            call_symbol: Trading symbol for call option (e.g., 'NIFTY26JAN23500CE')
+            put_symbol: Trading symbol for put option (e.g., 'NIFTY26JAN23500PE')
+            index_name: Index name ('NIFTY' or 'SENSEX')
+
+        Returns:
+            StraddlePrice with initial prices
         """
         exchange = self.kite.get_exchange_for_index(index_name)
-        prices = self.kite.get_ltp([call_token, put_token], exchange=exchange)
+        prices = self.kite.get_ltp_by_symbol([call_symbol, put_symbol], exchange=exchange)
         spot_price = self.kite.get_index_ltp(index_name)
 
-        call_price = prices.get(call_token, 0)
-        put_price = prices.get(put_token, 0)
+        call_price = prices.get(call_symbol, 0)
+        put_price = prices.get(put_symbol, 0)
+
+        if call_price == 0 or put_price == 0:
+            import logging
+            logging.warning(f"Initial prices may be incorrect - CE: {call_price}, PE: {put_price}")
 
         return self.calculate_straddle_price(call_price, put_price, spot_price)
 

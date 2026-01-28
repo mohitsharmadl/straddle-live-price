@@ -1,12 +1,17 @@
 """
 SQLAlchemy ORM models for straddle tracking.
 """
-from datetime import datetime
+from datetime import datetime, timezone
 from decimal import Decimal
 from sqlalchemy import Column, Integer, String, DateTime, Numeric, ForeignKey, Date
 from sqlalchemy.orm import declarative_base, relationship
 
 Base = declarative_base()
+
+
+def utc_now():
+    """Get current UTC time (timezone-aware)."""
+    return datetime.now(timezone.utc)
 
 
 class StraddleSession(Base):
@@ -17,8 +22,8 @@ class StraddleSession(Base):
     index_name = Column(String(20), nullable=False)  # 'NIFTY' or 'SENSEX'
     expiry_date = Column(Date, nullable=False)
     atm_strike = Column(Numeric(10, 2), nullable=False)
-    started_at = Column(DateTime, default=datetime.now)
-    ended_at = Column(DateTime, nullable=True)
+    started_at = Column(DateTime(timezone=True), default=utc_now)
+    ended_at = Column(DateTime(timezone=True), nullable=True)
 
     # Relationships
     ticks = relationship('StraddleTick', back_populates='session', cascade='all, delete-orphan')
@@ -34,7 +39,7 @@ class StraddleTick(Base):
 
     id = Column(Integer, primary_key=True, autoincrement=True)
     session_id = Column(Integer, ForeignKey('straddle_sessions.id'), nullable=False)
-    timestamp = Column(DateTime, nullable=False, default=datetime.now)
+    timestamp = Column(DateTime(timezone=True), nullable=False, default=utc_now)
     call_price = Column(Numeric(10, 2), nullable=False)
     put_price = Column(Numeric(10, 2), nullable=False)
     straddle_price = Column(Numeric(10, 2), nullable=False)
@@ -54,7 +59,7 @@ class StraddleChart(Base):
     id = Column(Integer, primary_key=True, autoincrement=True)
     session_id = Column(Integer, ForeignKey('straddle_sessions.id'), nullable=False)
     chart_path = Column(String(500), nullable=True)
-    generated_at = Column(DateTime, default=datetime.now)
+    generated_at = Column(DateTime(timezone=True), default=utc_now)
 
     # Relationships
     session = relationship('StraddleSession', back_populates='charts')

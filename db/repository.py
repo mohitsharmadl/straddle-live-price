@@ -1,7 +1,7 @@
 """
 Data access layer for straddle tracking.
 """
-from datetime import datetime, date
+from datetime import datetime, date, timezone
 from decimal import Decimal
 from typing import Optional
 from sqlalchemy.orm import Session
@@ -9,11 +9,18 @@ from sqlalchemy.orm import Session
 from .models import StraddleSession, StraddleTick, StraddleChart
 
 
+def utc_now() -> datetime:
+    """Get current UTC time (timezone-aware)."""
+    return datetime.now(timezone.utc)
+
+
 class StraddleRepository:
     """Repository for straddle data operations."""
 
     def __init__(self, session: Session):
         self.session = session
+        self._pending_ticks: list[StraddleTick] = []
+        self._batch_size = 10  # Commit every 10 ticks
 
     # Session operations
     def create_session(
@@ -27,7 +34,7 @@ class StraddleRepository:
             index_name=index_name,
             expiry_date=expiry_date,
             atm_strike=atm_strike,
-            started_at=datetime.now()
+            started_at=utc_now()
         )
         self.session.add(straddle_session)
         self.session.commit()
@@ -36,9 +43,12 @@ class StraddleRepository:
 
     def end_session(self, session_id: int) -> Optional[StraddleSession]:
         """Mark a session as ended."""
+        # Flush any pending ticks before ending
+        self._flush_pending_ticks()
+
         straddle_session = self.session.query(StraddleSession).get(session_id)
         if straddle_session:
-            straddle_session.ended_at = datetime.now()
+            straddle_session.ended_at = utc_now()
             self.session.commit()
         return straddle_session
 
@@ -60,6 +70,13 @@ class StraddleRepository:
             StraddleSession.ended_at.is_(None)
         ).all()
 
+    def _flush_pending_ticks(self):
+        """Flush all pending ticks to the database."""
+        if self._pending_ticks:
+            self.session.add_all(self._pending_ticks)
+            self.session.commit()
+            self._pending_ticks = []
+
     # Tick operations
     def add_tick(
         self,
@@ -69,19 +86,28 @@ class StraddleRepository:
         spot_price: Optional[Decimal] = None,
         timestamp: Optional[datetime] = None
     ) -> StraddleTick:
-        """Record a price tick."""
+        """
+        Record a price tick with batching.
+
+        Ticks are batched and committed every N ticks to reduce DB load.
+        """
         straddle_price = call_price + put_price
         tick = StraddleTick(
             session_id=session_id,
-            timestamp=timestamp or datetime.now(),
+            timestamp=timestamp or utc_now(),
             call_price=call_price,
             put_price=put_price,
             straddle_price=straddle_price,
             spot_price=spot_price
         )
-        self.session.add(tick)
-        self.session.commit()
-        self.session.refresh(tick)
+
+        # Add to pending batch
+        self._pending_ticks.append(tick)
+
+        # Commit if batch is full
+        if len(self._pending_ticks) >= self._batch_size:
+            self._flush_pending_ticks()
+
         return tick
 
     def get_session_ticks(
@@ -118,10 +144,13 @@ class StraddleRepository:
         chart_path: str
     ) -> StraddleChart:
         """Record a chart snapshot."""
+        # Flush pending ticks before adding chart
+        self._flush_pending_ticks()
+
         chart = StraddleChart(
             session_id=session_id,
             chart_path=chart_path,
-            generated_at=datetime.now()
+            generated_at=utc_now()
         )
         self.session.add(chart)
         self.session.commit()

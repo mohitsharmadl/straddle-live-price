@@ -11,10 +11,17 @@ from urllib.parse import urlparse, parse_qs
 from typing import Optional, Callable
 import threading
 import time
+import logging
 
 from kiteconnect import KiteConnect, KiteTicker
 
 from config import config
+
+# Configure logging
+logger = logging.getLogger(__name__)
+
+# OAuth timeout in seconds (2 minutes)
+OAUTH_TIMEOUT_SECONDS = 120
 
 # Optional imports for headless login
 try:
@@ -119,20 +126,30 @@ class KiteClient:
         return self._browser_login()
 
     def _browser_login(self) -> bool:
-        """Traditional browser-based OAuth login."""
+        """Traditional browser-based OAuth login with overall timeout."""
         # Start local server to capture redirect
         server = HTTPServer(('127.0.0.1', 8000), TokenCaptureHandler)
-        server.timeout = 120  # 2 minute timeout
+        server.timeout = 5  # 5 second timeout per request
 
         # Generate login URL
         login_url = self.kite.login_url()
         print(f"\nOpening browser for Kite login...")
-        print(f"If browser doesn't open, visit: {login_url}\n")
+        print(f"If browser doesn't open, visit: {login_url}")
+        print(f"(Timeout: {OAUTH_TIMEOUT_SECONDS} seconds)\n")
         webbrowser.open(login_url)
 
-        # Wait for redirect with token
+        # Wait for redirect with token (with overall timeout)
         TokenCaptureHandler.token = None
+        start_time = time.time()
+
         while TokenCaptureHandler.token is None:
+            # Check overall timeout
+            elapsed = time.time() - start_time
+            if elapsed >= OAUTH_TIMEOUT_SECONDS:
+                print(f"\nOAuth login timed out after {OAUTH_TIMEOUT_SECONDS} seconds.")
+                server.server_close()
+                return False
+
             server.handle_request()
 
         request_token = TokenCaptureHandler.token
@@ -410,18 +427,32 @@ class KiteClient:
         expiries = sorted(set(inst['expiry'] for inst in instruments))
         return expiries
 
-    def get_ltp(self, instrument_tokens: list[int], exchange: str = 'NFO') -> dict[int, float]:
-        """Get last traded price for instruments."""
-        if not instrument_tokens:
+    def get_ltp_by_symbol(self, trading_symbols: list[str], exchange: str = 'NFO') -> dict[str, float]:
+        """
+        Get last traded price for instruments by trading symbol.
+
+        Args:
+            trading_symbols: List of trading symbols (e.g., ['NIFTY26JAN23500CE', 'NIFTY26JAN23500PE'])
+            exchange: Exchange code ('NFO' for NIFTY, 'BFO' for SENSEX)
+
+        Returns:
+            Dict mapping trading symbol to last price
+        """
+        if not trading_symbols:
             return {}
 
-        # Kite API expects exchange:token format for quotes
-        # We'll use the ticker for real-time, this is for initial fetch
-        quotes = self.kite.ltp([f"{exchange}:{token}" for token in instrument_tokens])
-        return {
-            int(key.split(':')[1]): data['last_price']
-            for key, data in quotes.items()
-        }
+        # Kite LTP API expects exchange:tradingsymbol format
+        symbols_with_exchange = [f"{exchange}:{symbol}" for symbol in trading_symbols]
+
+        try:
+            quotes = self.kite.ltp(symbols_with_exchange)
+            return {
+                key.split(':')[1]: data['last_price']
+                for key, data in quotes.items()
+            }
+        except Exception as e:
+            logger.warning(f"Failed to fetch LTP for {trading_symbols}: {e}")
+            return {}
 
     def get_exchange_for_index(self, index_name: str) -> str:
         """Get the exchange for an index (NFO for NIFTY, BFO for SENSEX)."""
