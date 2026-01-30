@@ -162,3 +162,43 @@ class StraddleRepository:
         return self.session.query(StraddleChart).filter(
             StraddleChart.session_id == session_id
         ).order_by(StraddleChart.generated_at.desc()).all()
+
+
+    # Session resume operations
+    def get_or_resume_session(
+        self,
+        index_name: str,
+        expiry_date: date,
+        atm_strike: Decimal
+    ) -> tuple:
+        """
+        Get existing open session for today or create a new one.
+        
+        Returns: (session, is_resumed) tuple
+        """
+        from datetime import timezone, timedelta
+        
+        # IST timezone for date comparison
+        IST = timezone(timedelta(hours=5, minutes=30))
+        today_ist = datetime.now(IST).date()
+        
+        # Look for an open session (ended_at is NULL) that started today
+        existing = self.session.query(StraddleSession).filter(
+            StraddleSession.index_name == index_name,
+            StraddleSession.ended_at.is_(None)
+        ).order_by(StraddleSession.started_at.desc()).first()
+        
+        if existing:
+            # Check if the session started today (in IST)
+            session_date_ist = existing.started_at.astimezone(IST).date()
+            if session_date_ist == today_ist:
+                # Resume existing session, update strike if changed
+                if existing.atm_strike != atm_strike:
+                    existing.atm_strike = atm_strike
+                    self.session.commit()
+                print(f"[Resuming session {existing.id}]")
+                return existing, True
+        
+        # Create new session
+        new_session = self.create_session(index_name, expiry_date, atm_strike)
+        return new_session, False

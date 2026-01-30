@@ -310,12 +310,14 @@ class StraddleTracker:
 
         try:
             # Create tracking session in DB (use UTC timestamp)
-            session = repo.create_session(
+            session, is_resumed = repo.get_or_resume_session(
                 index_name=self.straddle.index_name,
                 expiry_date=self.straddle.expiry,
                 atm_strike=Decimal(str(self.straddle.atm_strike))
             )
             self._session_id = session.id
+            if is_resumed:
+                print(f"[Resumed session {session.id} with {repo.get_tick_count(session.id)} existing ticks]")
 
             # Get initial prices (using trading symbols, not tokens)
             initial_price = self.calculator.get_initial_prices(
