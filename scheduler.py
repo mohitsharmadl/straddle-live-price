@@ -1,3 +1,4 @@
+import os
 """
 Scheduler for 1-second price tracking during market hours.
 """
@@ -95,7 +96,7 @@ class StraddleTracker:
         now_ist = datetime.now(IST)
 
         # Check if it's a weekday (Monday=0 to Friday=4)
-        if now_ist.weekday() > 4:  # Saturday=5, Sunday=6
+        if now_ist.weekday() > 4 and not os.getenv("FORCE_MARKET_OPEN"):  # Saturday=5, Sunday=6
             return False
 
         # Check time of day
