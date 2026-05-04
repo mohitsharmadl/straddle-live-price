@@ -47,24 +47,46 @@ def get_db():
     return psycopg2.connect(DB_URL)
 
 
-def load_kite():
-    """Initialize and authenticate Kite client."""
+def _try_load_token():
+    """Return an authenticated KiteConnect or None if no valid token exists today."""
     kite = KiteConnect(api_key=config.KITE_API_KEY)
     token_file = config.TOKEN_FILE
-
-    if token_file.exists():
+    if not token_file.exists():
+        return None
+    try:
         data = json.loads(token_file.read_text())
-        if data.get('date') == str(date.today()):
-            kite.set_access_token(data['access_token'])
-            try:
-                kite.profile()
-                logger.info("Kite auth: reused today's token")
-                return kite
-            except Exception:
-                pass
+    except Exception:
+        return None
+    if data.get('date') != str(date.today()):
+        return None
+    kite.set_access_token(data['access_token'])
+    try:
+        kite.profile()
+        return kite
+    except Exception:
+        return None
 
-    logger.error("No valid Kite token for today. Run straddle-tracker first to generate token.")
-    raise SystemExit(1)
+
+def load_kite():
+    """Wait for a valid Kite token and return an authenticated client.
+
+    Polls every 60s instead of exiting, so when Kite re-auth happens
+    (subscription renewal, daily token refresh) the writer auto-recovers
+    without manual restart.
+    """
+    logged_waiting = False
+    while True:
+        kite = _try_load_token()
+        if kite:
+            logger.info("Kite auth: reused today's token")
+            return kite
+        if not logged_waiting:
+            logger.warning(
+                "No valid Kite token for today. Waiting for kite_token_refresh "
+                "(or straddle-tracker) to write one. Polling every 60s."
+            )
+            logged_waiting = True
+        time.sleep(60)
 
 
 # ── WebSocket-based holdings PnL tracking ──
